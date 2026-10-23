@@ -41,30 +41,48 @@ public class ItemEnhancementManagerV2
     // its names, so each list is an enum made when the script loads: None, then the matching items
     // in the inventory (and the bank, when it was loaded this session), then the items already
     // picked, so a pick that was banked or sold is still shown and kept. Skua shows "_" as a space.
-    private static Type WeaponItems => ItemList("Weapon", item => item.ItemGroup == "Weapon");
-    private static Type HelmItems => ItemList("Helm", item => item.Category == ItemCategory.Helm);
-    private static Type CapeItems => ItemList("Cape", item => item.Category == ItemCategory.Cape);
+    private static Type WeaponItems => ItemList("Weapon");
+    private static Type HelmItems => ItemList("Helm");
+    private static Type CapeItems => ItemList("Cape");
 
-    private static Type ItemList(string category, Func<InventoryItem, bool> kind)
+    private static bool InCategory(string category, InventoryItem item) => category switch
+    {
+        "Weapon" => item.ItemGroup == "Weapon",
+        "Helm" => item.Category == ItemCategory.Helm,
+        _ => item.Category == ItemCategory.Cape,
+    };
+
+    private static Type ItemList(string category)
     {
         IScriptInterface bot = IScriptInterface.Instance;
-        IEnumerable<string> owned = Enumerable.Empty<string>();
+        List<string> owned = new();
         try
         {
             owned = bot.Inventory.Items.Concat(bot.Bank.Items)
-                .Where(item => item?.Name != null && kind(item))
-                .Select(item => item.Name.Trim());
+                .Where(item => item?.Name != null && InCategory(category, item))
+                .Select(item => item.Name.Trim())
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
         catch
         {
             // Not logged in: only None and the saved picks.
         }
 
+        // Owned items differing in more than case each get a row (two names that only differ in
+        // punctuation are two items). A saved pick is left out when it looks like a listed item with
+        // case, spaces and punctuation ignored: names typed into the original manager were loose.
         List<string> names = new() { "None" };
-        HashSet<string> keys = new() { Key("None") };
-        foreach (string name in owned.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).Concat(SavedPicks(category)))
+        HashSet<string> literals = new(StringComparer.OrdinalIgnoreCase) { "None" };
+        foreach (string name in owned)
         {
-            if (name.Length > 0 && keys.Add(Key(name)))
+            if (name.Length > 0 && literals.Add(EnumName(name)))
+                names.Add(name);
+        }
+        HashSet<string> keys = new(names.Select(Key));
+        foreach (string name in SavedPicks(category))
+        {
+            if (name.Length > 0 && keys.Add(Key(name)) && literals.Add(EnumName(name)))
                 names.Add(name);
         }
 
@@ -82,6 +100,18 @@ public class ItemEnhancementManagerV2
     {
         string text = name.Trim().Replace(", ", " ").Replace(',', ' ').Replace(' ', '_');
         return text.Length > 0 && (char.IsDigit(text[0]) || text[0] == '-' || text[0] == '+') ? "#" + text : text;
+    }
+
+    // The owned item a pick names, in its category: the same name first (as the dropdown saved it,
+    // case ignored), else one that matches with spaces and punctuation ignored too (names typed into
+    // the original manager).
+    private InventoryItem? FindItem(string category, string pick)
+    {
+        List<InventoryItem> items = Bot.Inventory.Items.Concat(Bot.Bank.Items)
+            .Where(item => item?.Name != null && InCategory(category, item))
+            .ToList();
+        return items.FirstOrDefault(item => string.Equals(EnumName(item.Name), EnumName(pick), StringComparison.OrdinalIgnoreCase))
+            ?? items.FirstOrDefault(item => Key(item.Name) == Key(pick));
     }
 
     // Compares an item's name with a pick: case, spaces and punctuation ignored.
@@ -229,6 +259,7 @@ public class ItemEnhancementManagerV2
 
     private void Run()
     {
+        Dictionary<int, string> enhanced = new();
         foreach (string category in MultiOptions)
         {
             if (category == "Skip_Options")
@@ -253,22 +284,20 @@ public class ItemEnhancementManagerV2
                 if (selection == "None")
                     continue;
 
-                InventoryItem? item = Bot.Inventory.Items.Concat(Bot.Bank.Items).FirstOrDefault(candidate =>
-                    candidate?.Name != null && Key(candidate.Name) == Key(itemName));
+                InventoryItem? item = FindItem(category, itemName);
                 string logName = new string((item?.Name ?? itemName)
                     .Where(character => character >= ' ' && character <= '~' && "%<>&\"'".IndexOf(character) < 0)
                     .ToArray());
                 if (item == null)
                 {
-                    Core.Logger($"{category} item {index} - {logName} was not found in inventory or bank. Check the configured name.");
+                    Core.Logger($"{category} item {index} - {logName} was not found among the {category.ToLower()}s in inventory or bank. Check the configured name.");
                     continue;
                 }
 
-                if ((category == "Weapon" && item.ItemGroup != "Weapon")
-                    || (category == "Helm" && item.Category != ItemCategory.Helm)
-                    || (category == "Cape" && item.Category != ItemCategory.Cape))
+                // The same item in two slots: the second enhancement would replace the first.
+                if (enhanced.TryGetValue(item.ID, out string? earlier))
                 {
-                    Core.Logger($"{category} item {index} - {logName} [ID {item.ID}] is in the wrong equipment section. Skipping.");
+                    Core.Logger($"{category} item {index} - {logName} [ID {item.ID}] is the same item as {earlier}, enhanced already. Skipping.");
                     continue;
                 }
 
@@ -316,6 +345,7 @@ public class ItemEnhancementManagerV2
                     continue;
                 }
 
+                enhanced[itemID] = $"{category} item {index}";
                 Core.Logger($"Applying {selection.Replace('_', ' ')} to {category} item {index} - {logName} [ID {itemID}].");
                 Adv.EnhanceItem(item.Name, type, cape, helm, weapon, logging: true, bypassDisableAutoEnhance: true);
                 bool applied = Bot.Wait.ForTrue(() =>
