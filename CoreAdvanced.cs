@@ -2569,11 +2569,12 @@ public class CoreAdvanced
         if (wSpecial == WeaponSpecial.None)
             return currentPattern == (int)type;
 
-        if ((int)wSpecial > 0 && (int)wSpecial <= 6)
-            return currentPattern == (int)type && currentProc == (int)wSpecial;
-
+        // Forge is WeaponSpecial 1, inside the Awe range below: check it first.
         if (wSpecial == WeaponSpecial.Forge)
             return currentProc == 0 && (currentPattern == (int)type || currentPattern == 10);
+
+        if ((int)wSpecial > 0 && (int)wSpecial <= 6)
+            return currentPattern == (int)type && currentProc == (int)wSpecial;
 
         return currentProc == (int)wSpecial;
     }
@@ -2809,7 +2810,8 @@ public class CoreAdvanced
             int shopID = 0;
             bool canEnhance = true;
 
-            if ((int)wSpecial > 0 && (int)wSpecial <= 6)
+            // Awe specials (2-6) are bought in the Awe shops; Forge (1) in the Forge shop below.
+            if (wSpecial != WeaponSpecial.Forge && (int)wSpecial > 0 && (int)wSpecial <= 6)
             {
                 switch (type)
                 {
