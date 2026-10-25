@@ -41,7 +41,8 @@ public class ItemEnhancementManagerV2
     // its names, so each list is an enum made when the script loads: None, then the matching items
     // in the inventory (and the bank, when it was loaded this session), then the items already
     // picked, so a pick that was banked or sold is still shown and kept. Skua shows "_" as a space.
-    // Forge is offered for all three: CoreAdvanced applies it once it is unlocked (checked per slot).
+    // Forge and the other specials are offered for all three; a slot whose special this account has
+    // not unlocked is skipped with a line in the log (Unlocked).
     private static Type WeaponItems => ItemList("Weapon");
     private static Type HelmItems => ItemList("Helm");
     private static Type CapeItems => ItemList("Cape");
@@ -422,16 +423,6 @@ public class ItemEnhancementManagerV2
                     {
                         if (!Enum.TryParse(selection, out weapon))
                             continue;
-                        if (weapon == WeaponSpecial.Forge && !Adv.uForgeWeapon())
-                        {
-                            Core.Logger($"Weapon item {index} - {logName} [ID {item.ID}] needs the Forge (Weapon) enhancement unlocked. Skipping.");
-                            continue;
-                        }
-                        if ((int)weapon >= 2 && (int)weapon <= 6 && !Adv.uAwe())
-                        {
-                            Core.Logger($"Weapon item {index} - {logName} [ID {item.ID}] requires unlocked Awe enhancements. Skipping.");
-                            continue;
-                        }
                         if (Enum.IsDefined(typeof(EnhancementType), item.EnhancementPatternID))
                             type = (EnhancementType)item.EnhancementPatternID;
                     }
@@ -439,21 +430,14 @@ public class ItemEnhancementManagerV2
                     {
                         if (!Enum.TryParse(selection, out helm))
                             continue;
-                        if (helm == HelmSpecial.Forge && !Adv.uForgeHelm())
-                        {
-                            Core.Logger($"Helm item {index} - {logName} [ID {item.ID}] needs the Forge (Helm) enhancement unlocked. Skipping.");
-                            continue;
-                        }
                     }
-                    else
+                    else if (!Enum.TryParse(selection, out cape))
+                        continue;
+
+                    if (Unlocked(category, selection) is { } unlocked && !unlocked)
                     {
-                        if (!Enum.TryParse(selection, out cape))
-                            continue;
-                        if (cape == CapeSpecial.Forge && !Adv.uForgeCape())
-                        {
-                            Core.Logger($"Cape item {index} - {logName} [ID {item.ID}] needs the Forge (Cape) enhancement unlocked. Skipping.");
-                            continue;
-                        }
+                        Core.Logger($"{category} item {index} - {logName} [ID {item.ID}]: {selection.Replace('_', ' ')} is not unlocked on this account. Skipping.");
+                        continue;
                     }
                 }
 
@@ -498,6 +482,42 @@ public class ItemEnhancementManagerV2
 
         Core.Logger("Item enhancement pass finished.");
     }
+
+    /// <summary>
+    /// Whether this account has unlocked a special enhancement (CoreAdvanced's checks), or null for
+    /// the plain ones every account has. Checked before buying, so a locked choice is skipped with
+    /// a clear line instead of failing inside the enhancement shop.
+    /// </summary>
+    private bool? Unlocked(string category, string special) => special switch
+    {
+        "Forge" => category switch
+        {
+            "Weapon" => Adv.uForgeWeapon(),
+            "Helm" => Adv.uForgeHelm(),
+            _ => Adv.uForgeCape(),
+        },
+        "Spiral_Carve" or "Awe_Blast" or "Health_Vamp" or "Mana_Vamp" or "Powerword_Die" => Adv.uAwe(),
+        "Lacerate" => Adv.uLacerate(),
+        "Smite" => Adv.uSmite(),
+        "Valiance" => Adv.uValiance(),
+        "Arcanas_Concerto" => Adv.uArcanasConcerto(),
+        "Acheron" => Adv.uAcheron(),
+        "Elysium" => Adv.uElysium(),
+        "Praxis" => Adv.uPraxis(),
+        "Dauntless" => Adv.uDauntless(),
+        "Ravenous" => Adv.uRavenous(),
+        "Vim" => Adv.uVim(),
+        "Examen" => Adv.uExamen(),
+        "Anima" => Adv.uAnima(),
+        "Pneuma" => Adv.uPneuma(),
+        "Hearty" => Adv.uHearty(),
+        "Absolution" => Adv.uAbsolution(),
+        "Avarice" => Adv.uAvarice(),
+        "Vainglory" => Adv.uVainglory(),
+        "Penitence" => Adv.uPenitence(),
+        "Lament" => Adv.uLament(),
+        _ => null,
+    };
 
     public enum WeaponEnhancement
     {
