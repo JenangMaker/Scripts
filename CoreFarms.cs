@@ -1495,7 +1495,6 @@ public class CoreFarms
         int quant = 1
     )
     {
-        Bot.Events.ExtensionPacketReceived += AlchemyPacketCheck;
         if (
             rank != 0 && FactionRank("Alchemy") < rank
             || (item != null && Core.CheckInventory(item, quant))
@@ -1543,6 +1542,9 @@ public class CoreFarms
         Core.Logger($"Modifier: {modifier}.");
         Core.Join("alchemy");
 
+        string runeName = rune == AlchemyRunes.Dragon ? nameof(AlchemyRunes.Gebo) : rune.ToString();
+        int extraWaitMs = 0;
+        Bot.Events.ExtensionPacketReceived += AlchemyPacketCheck;
         int i = 1;
         if (loop)
         {
@@ -1565,52 +1567,61 @@ public class CoreFarms
         else
             Packet();
 
+        // alchemyGame_v5.swf (2026-10-27) crafts with alchStart / alchDone. The
+        // old getAlchWait / checkAlchComplete still get replies but craft
+        // nothing, so every "completed" craft was empty.
+        // alchStart: both reagent IDs, the rune (Jera, Uruz, Fehu or Gebo), the
+        // Dragon Runestone (1: faster mix and the best result, one stone a
+        // craft) and the wanted effect (the trait code, e.g. Luc for Fate). The
+        // effect is still rolled by the server: an unwanted one ends the craft
+        // too, and the loop goes on until `item` reaches `quant`.
         bool Packet()
         {
-            // Reset flags at the start of each craft
             lock (_alchemyLock)
             {
-                _alchemyCraftStarted = false;
-                _alchemyCraftCompleted = false;
+                _alchemyStartReply = null;
+                _alchemyDoneReply = null;
             }
 
-            // Initiate potion craft
-            Core.SendPackets($"%xt%zm%crafting%1%alchStart%{reagentid1}%{reagentid2}%{rune}%1%{trait}%");
-
-            // Wait for the server to accept alchStart
-            if (!WaitForAlchemyFlag(() => _alchemyCraftStarted, 10000))
+            Bot.Send.Packet($"%xt%zm%crafting%{Bot.Map.RoomID}%alchStart%{reagentid1}%{reagentid2}%{runeName}%1%{trait}%");
+            if (!WaitForAlchemyReply(() => _alchemyStartReply != null, 10000))
             {
-                Core.Logger("Failed to receive server craft start confirmation (10s timeout)");
+                Core.Logger("The server did not answer the craft start (10 s)");
+                return false;
+            }
+            var start = _alchemyStartReply!.Value;
+            if (!start.ok)
+            {
+                Core.Logger($"Craft refused: {start.msg}");
                 return false;
             }
 
-            Core.Logger("Server confirmed craft start, sending completion packet");
+            // Let the mixture finish: alchDone sent too soon ends it for nothing.
+            int mixMs = AlchemyMixMs(reagentid1, reagentid2, true) + 1500 + extraWaitMs;
+            Core.Sleep(mixMs);
 
-            // Send completion packet
-            Core.SendPackets("%xt%zm%crafting%1%alchDone%");
-
-            // Wait for completion (single log)
-            bool completed = WaitForAlchemyFlag(() => _alchemyCraftCompleted, 10000);
-
-            lock (_alchemyLock)
+            Bot.Send.Packet($"%xt%zm%crafting%{Bot.Map.RoomID}%alchDone%");
+            if (!WaitForAlchemyReply(() => _alchemyDoneReply != null, 10000))
             {
-                if (completed)
+                Core.Logger("The server did not answer the craft finish (10 s)");
+                return false;
+            }
+            var done = _alchemyDoneReply!.Value;
+            if (!done.ok)
+            {
+                // Too quick for this mixture: wait longer from now on. The
+                // reagents were not used.
+                if (done.msg.Contains("too quickly", StringComparison.OrdinalIgnoreCase) && extraWaitMs < 30000)
                 {
-                    // Only log once per craft
-                    if (_alchemyCraftCompleted)
-                        Core.Logger("Server confirmed craft completion");
-
-                    // Reset flags for the next craft
-                    _alchemyCraftStarted = false;
-                    _alchemyCraftCompleted = false;
+                    extraWaitMs += 3000;
+                    Core.Logger($"Craft finished too quickly after {mixMs / 1000.0:F1} s; waiting {extraWaitMs / 1000} s longer from now on");
+                    return true;
                 }
-                else
-                {
-                    Core.Logger("Warning: Did not receive completion confirmation within 10s");
-                    return false;
-                }
+                Core.Logger($"Craft failed: {done.msg}");
+                return false;
             }
 
+            Core.Logger($"Crafted {done.stat} (+{done.rep} Alchemy rep)");
             Core.Sleep(500);
             return true;
         }
@@ -1619,9 +1630,9 @@ public class CoreFarms
     }
 
     /// <summary>
-    /// Waits for an alchemy flag to become true with timeout
+    /// Waits for the server's alchemy reply, with a timeout
     /// </summary>
-    private bool WaitForAlchemyFlag(Func<bool> flagCheck, int timeoutMs)
+    private bool WaitForAlchemyReply(Func<bool> flagCheck, int timeoutMs)
     {
         int elapsed = 0;
         int checkInterval = 100;
@@ -1889,53 +1900,73 @@ public class CoreFarms
         ToggleBoost(BoostType.Reputation, false);
     }
 
-    // Add these class-level fields
-    private bool _alchemyCraftStarted = false;
-    private bool _alchemyCraftCompleted = false;
+    // The server's answers to the current craft (alchemyGame_v5): null until
+    // it answers. {ok, msg} for alchStart; {ok, msg, stat, rep} for alchDone.
+    private (bool ok, string msg)? _alchemyStartReply;
+    private (bool ok, string msg, string stat, int rep)? _alchemyDoneReply;
     private readonly object _alchemyLock = new();
     void AlchemyPacketCheck(dynamic packet)
     {
-
         string? type = packet["params"]?.type;
         dynamic? data = packet["params"]?.dataObj;
+        if (type != "json" || data == null)
+            return;
 
-        if (type == "json" && data != null)
+        string? cmd = data.cmd;
+        bool ok = data.ok != null && (int)data.ok == 1;
+        string msg = data.msg != null ? (string)data.msg : "";
+        lock (_alchemyLock)
         {
-            string cmd = data!.cmd;
             switch (cmd)
             {
                 case "alchStart":
-                    lock (_alchemyLock)
-                    {
-                        _alchemyCraftStarted = data.ok == 1;
-                        if (_alchemyCraftStarted)
-                            Core.Logger("Alchemy craft started (confirmed by server)");
-                    }
+                    _alchemyStartReply = (ok, msg);
                     break;
 
                 case "alchDone":
-                    lock (_alchemyLock)
-                    {
-                        if (data.ok == 1 && !_alchemyCraftCompleted) // only log once
-                        {
-                            _alchemyCraftCompleted = true;
-                            Core.Logger("Alchemy craft completed (confirmed by server)");
-                        }
-                    }
-                    break;
-
-
-                case "alchError":
-                    lock (_alchemyLock)
-                    {
-                        _alchemyCraftStarted = false;
-                        _alchemyCraftCompleted = false;
-                        // if (Core.DL_Enabled == true)
-                        Core.Logger($"Alchemy error: {data.error ?? "Unknown error"}");
-                    }
+                    _alchemyDoneReply = (ok, msg, data.stat != null ? (string)data.stat : "", data.rep != null ? (int)data.rep : 0);
                     break;
             }
         }
+    }
+
+    // Each reagent's mixing goal in alchemyGame_v5.swf (AlchemyData.REAGENTS):
+    // a mixture is done when its progress reaches the higher of its two
+    // reagents' goals. The server refuses an alchDone sent sooner than a mix
+    // could finish ("Finished too quickly.") and drops that mixture.
+    private static readonly Dictionary<int, int> AlchemyReagentGoals = new()
+    {
+        [11467] = 1000, // Fish Oil
+        [11468] = 1300, // Searbush
+        [11469] = 1100, // Nimblestem
+        [11470] = 1100, // Rhison Blood
+        [11471] = 1300, // Roc Tongue
+        [11472] = 1100, // Moglin Tears
+        [11473] = 1100, // Arashtite Ore
+        [11474] = 1000, // Dried Slime
+        [11475] = 1400, // Dragon Scale
+        [11476] = 900,  // Trollola Nectar
+        [11477] = 900,  // Doomatter
+        [11478] = 1000, // Ice Vapor
+        [11479] = 1200, // Lemurphant Tears
+        [11480] = 1200, // Necrot
+        [11481] = 1400, // Chaoroot
+        [11482] = 1500, // Chaos Entity
+    };
+
+    /// <summary>
+    /// How long a mixture of these reagents takes at best, in ms: the game's
+    /// mix sim adds 5 x 3.3 progress (Dragon Runestone, 5 x 1.7 without) every
+    /// 250 ms. Arashtite Ore + Dried Slime: 1100 / 16.5 x 250 = ~16.7 s; the
+    /// server took 18 s and refused 12 s (2026-10-28).
+    /// </summary>
+    private static int AlchemyMixMs(int reagentID1, int reagentID2, bool dragon)
+    {
+        int goal = Math.Max(
+            AlchemyReagentGoals.GetValueOrDefault(reagentID1, 1500),
+            AlchemyReagentGoals.GetValueOrDefault(reagentID2, 1500));
+        double perTick = 5 * (dragon ? 3.3 : 1.7);
+        return (int)Math.Ceiling(goal / perTick) * 250;
     }
 
 
